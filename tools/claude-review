@@ -1,0 +1,113 @@
+#!/bin/bash
+# Monthly review helper - aggregates patterns and helps extract insights
+
+MONTH=${1:-$(date +%Y-%m)}
+PATTERN_FILE=~/agentic-coding-research/patterns/$MONTH.md
+INSIGHT_FILE=~/agentic-coding-research/insights/$MONTH.md
+
+echo "📊 Monthly Review for $MONTH"
+echo ""
+
+# Check if pattern file exists
+if [ ! -f "$PATTERN_FILE" ]; then
+  echo "❌ No patterns found for $MONTH"
+  echo "   Expected: $PATTERN_FILE"
+  exit 1
+fi
+
+# Count patterns
+PATTERN_COUNT=$(grep -c "^\*\*Pattern:\*\*" "$PATTERN_FILE")
+PROJECT_COUNT=$(grep "^\*\*Project:\*\*" "$PATTERN_FILE" | sort -u | wc -l)
+
+echo "Patterns captured: $PATTERN_COUNT"
+echo "Projects worked on: $PROJECT_COUNT"
+echo ""
+
+# Show patterns
+echo "---"
+cat "$PATTERN_FILE"
+echo "---"
+echo ""
+
+# Create insight template if doesn't exist
+if [ ! -f "$INSIGHT_FILE" ]; then
+  cat > "$INSIGHT_FILE" <<EOF
+# Insights: $(date +%B %Y)
+
+## Projects Shipped
+
+1. [Project name] - [Description]
+
+## Patterns That Emerged
+
+### What Worked 🟢
+
+- **[Pattern name]:** [Description with example]
+
+### What Broke 🔴
+
+- **[Pain point]:** [Description with example]
+
+### Innovations 💡
+
+- **[New workflow/pattern]:** [Description]
+
+## Tools Status
+
+### Claude Code
+- **Usage:** [X sessions across Y projects]
+- **Satisfaction:** [X/10]
+- **Top use case:** [What worked best]
+- **Biggest frustration:** [What needs fixing]
+
+### Beads
+- **Projects tracked:** [X]
+- **What's working:** [...]
+- **What needs improvement:** [...]
+
+### Worktrees + Tmux
+- **What's working:** [...]
+- **What's breaking:** [...]
+
+### Other Tools
+- [Tool name]: [Status and learnings]
+
+## Decisions
+
+### Ship 🚀
+- [ ] [Pattern worth sharing publicly - blog post or thread]
+
+### Fix 🔧
+- [ ] [Pain point to address - build a tool or improve workflow]
+
+### Wait ⏸️
+- [ ] [Need more data before deciding]
+
+## Next Month Focus
+
+- [ ] [Thing to try]
+- [ ] [Thing to improve]
+- [ ] [Thing to document/share]
+
+## Notes
+
+[Any other observations]
+
+---
+
+## Raw Patterns
+
+(Copied from patterns/$MONTH.md for reference)
+
+EOF
+  cat "$PATTERN_FILE" >> "$INSIGHT_FILE"
+fi
+
+echo "📝 Edit insights file:"
+echo "   $INSIGHT_FILE"
+echo ""
+read -p "Open in editor? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+  ${EDITOR:-vim} "$INSIGHT_FILE"
+fi

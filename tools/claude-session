@@ -1,0 +1,80 @@
+#!/bin/bash
+# Quick session note creator for capturing Claude Code sessions
+
+SESSION_DIR=".claude/sessions"
+mkdir -p "$SESSION_DIR"
+DATE=$(date +%Y-%m-%d-%H%M)
+FILE="$SESSION_DIR/$DATE.md"
+
+if [ ! -f "$FILE" ]; then
+  cat > "$FILE" <<EOF
+# Session: $DATE
+
+## Goal
+[What are you building today?]
+
+## Starting Point
+[Current state of the project]
+
+---
+
+## Interactions
+
+### [Feature/Task Name]
+
+**Prompt:**
+\`\`\`
+[What you asked Claude]
+\`\`\`
+
+**Result:** ✅ Success / ⚠️ Partial / ❌ Failed
+
+**Notes:**
+- [What worked well]
+- [What needed refinement]
+- [Course corrections made]
+
+---
+
+## Outcomes
+
+- [X] [What was completed]
+- [ ] [What's still pending]
+
+## Patterns Observed
+
+**Wins:**
+- [Pattern that worked really well]
+
+**Pain Points:**
+- [Something that was frustrating]
+
+## Next Session
+
+- [ ] [What to continue next time]
+- [ ] [Blockers to resolve]
+
+---
+
+## Time Spent
+Start: $(date +%H:%M)
+End: [HH:MM]
+Duration: [X hours]
+EOF
+fi
+
+${EDITOR:-vim} "$FILE"
+
+# Offer to copy to research repo
+read -p "Copy pattern to research repo? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+  PROJECT_NAME=$(basename "$PWD")
+  echo "---" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+  echo "Date: $(date)" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+  echo "Project: $PROJECT_NAME" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+  echo "Session: $FILE" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+  echo "" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+  echo "Session notes saved. Extract patterns manually from $FILE" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+  echo "" >> ~/agentic-coding-research/patterns/$(date +%Y-%m).md
+fi

@@ -1,0 +1,45 @@
+#!/bin/bash
+# Quick pattern capture for wins and pain points
+
+if [ -z "$1" ]; then
+  echo "Usage: claude-pattern \"Your pattern or observation\""
+  echo ""
+  echo "Examples:"
+  echo "  claude-pattern \"Using Zod schemas in first prompt gets perfect validation\""
+  echo "  claude-pattern \"Context lost after 3 refactoring rounds - need breaks\""
+  exit 1
+fi
+
+PATTERN_FILE=~/agentic-coding-research/patterns/$(date +%Y-%m).md
+PROJECT_NAME=$(basename "$PWD")
+
+# Create file if it doesn't exist
+if [ ! -f "$PATTERN_FILE" ]; then
+  cat > "$PATTERN_FILE" <<EOF
+# Patterns: $(date +%B %Y)
+
+Captured patterns from real projects.
+
+EOF
+fi
+
+# Append pattern
+cat >> "$PATTERN_FILE" <<EOF
+---
+**Date:** $(date +%Y-%m-%d\ %H:%M)
+**Project:** $PROJECT_NAME
+**Pattern:** $1
+
+EOF
+
+echo "✅ Pattern captured to $PATTERN_FILE"
+
+# Optional: Add to git (if in git repo)
+if git rev-parse --git-dir > /dev/null 2>&1; then
+  read -p "Commit pattern to git? (y/n) " -n 1 -r
+  echo
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    git add "$PATTERN_FILE"
+    git commit -m "Pattern: $1" -m "Project: $PROJECT_NAME"
+  fi
+fi
