@@ -25,6 +25,57 @@ alias claude-review='~/agentic-coding-research/tools/claude-review'
 
 ## Usage
 
+### `wt` - Worktree Session TUI
+
+**When to use:** When you need to see all worktree sessions at a glance and jump between them
+
+```bash
+wt  # Launch interactive TUI dashboard
+```
+
+**Features:**
+- Visual snapshot of all worktrees
+- Status indicators: 🟢 Working | 🟡 Idle | 🔴 Error | ⚫ No session
+- Quick attach with Enter key
+- Shows commits ahead of main
+- Keyboard navigation (j/k or arrows)
+
+**Keyboard shortcuts:**
+- `Enter` - Attach to selected session
+- `j/k` or `↑/↓` - Navigate
+- `r` - Refresh (re-run wt)
+- `q/Esc` - Quit
+
+**Requirements:**
+- `gum` (install: `brew install gum`)
+- `tmux` (for sessions)
+- Git worktrees
+
+**Example output:**
+```
+┌─ Worktree Sessions ─────────────────────────────┐
+
+[1] 🟢 feature-auth        Working    3↑
+[2] 🟡 feature-billing     Idle       1↑
+[3] 🔴 redis-cache         Error      2↑
+[4] ⚫ main                No session -
+
+└──────────────────────────────────────────────────┘
+```
+
+**Status detection:**
+- 🟢 **Working**: Claude is actively using tools
+- 🟡 **Idle**: Session active, waiting for input
+- 🔴 **Error**: Error detected in session output
+- ⚫ **No session**: No tmux session for this worktree
+
+**Integrates with:**
+- `/worktree-new` - Creates sessions that wt can find
+- `/worktree-tmux` - Manages the sessions wt displays
+- BEADS_NO_DAEMON=1 - Automatically set in sessions
+
+---
+
 ### `claude-session` - Start a session note
 
 **When to use:** Beginning of a Claude Code work session

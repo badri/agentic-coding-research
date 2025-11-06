@@ -1,0 +1,166 @@
+#!/bin/bash
+# wt - Worktree Session TUI Dashboard
+# Minimal interactive dashboard for managing worktree tmux sessions
+
+set -e
+
+# Color codes for status
+COLOR_RUNNING="🟢"
+COLOR_IDLE="🟡"
+COLOR_ERROR="🔴"
+COLOR_NO_SESSION="⚫"
+
+# Gather worktree data
+gather_worktrees() {
+  local worktrees=()
+  local index=1
+
+  # Get all worktrees
+  while IFS= read -r line; do
+    # Parse git worktree list output: path branch
+    local path=$(echo "$line" | awk '{print $1}')
+    local branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+
+    # Skip if path doesn't exist
+    [ ! -d "$path" ] && continue
+
+    # Get worktree name (last part of path)
+    local name=$(basename "$path")
+
+    # Check if tmux session exists
+    local session_name="wt-$name"
+    local has_session=false
+    if tmux has-session -t "$session_name" 2>/dev/null; then
+      has_session=true
+    fi
+
+    # Detect status
+    local status="$COLOR_NO_SESSION"
+    local status_text="No session"
+
+    if [ "$has_session" = true ]; then
+      # Capture last 10 lines from tmux session
+      local last_output=$(tmux capture-pane -t "$session_name" -p 2>/dev/null | tail -10 || echo "")
+
+      # Detect Claude activity
+      if echo "$last_output" | grep -q "\[Using tool:"; then
+        status="$COLOR_RUNNING"
+        status_text="Working"
+      elif echo "$last_output" | grep -q "> "; then
+        status="$COLOR_IDLE"
+        status_text="Idle"
+      elif echo "$last_output" | grep -iq "error"; then
+        status="$COLOR_ERROR"
+        status_text="Error"
+      else
+        status="$COLOR_IDLE"
+        status_text="Active"
+      fi
+    fi
+
+    # Get commits ahead of main (if not main branch)
+    local ahead=""
+    if [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
+      local count=$(git -C "$path" rev-list --count main.."$branch" 2>/dev/null || echo "0")
+      if [ "$count" != "0" ]; then
+        ahead="${count}↑"
+      fi
+    fi
+
+    # Format row: [N] status name status_text ahead
+    local row=$(printf "[%d] %s %-25s %-10s %s" "$index" "$status" "$name" "$status_text" "$ahead")
+
+    # Store data
+    worktrees+=("$row|$session_name|$path|$has_session")
+    ((index++))
+  done < <(git worktree list 2>/dev/null || echo "")
+
+  # Return worktrees array
+  printf '%s\n' "${worktrees[@]}"
+}
+
+# Main function
+main() {
+  # Check if we're in a git repository
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Error: Not in a git repository"
+    exit 1
+  fi
+
+  # Gather worktree data
+  local worktrees_data=$(gather_worktrees)
+
+  if [ -z "$worktrees_data" ]; then
+    echo "No worktrees found"
+    exit 0
+  fi
+
+  # Extract just the display rows for gum
+  local display_rows=$(echo "$worktrees_data" | cut -d'|' -f1)
+
+  # Create header
+  local header="┌─ Worktree Sessions ─────────────────────────────────────────┐"
+  local footer="└──────────────────────────────────────────────────────────────┘"
+  local legend="🟢=Working  🟡=Idle  🔴=Error  ⚫=No session"
+  local help="[Enter] Attach | [r] Refresh | [q] Quit"
+
+  # Show with gum
+  echo "$header"
+  echo ""
+
+  selected=$(echo "$display_rows" | gum choose \
+    --height=15 \
+    --header="$legend" \
+    --cursor.foreground="212" \
+    --selected.foreground="212" \
+    --item.foreground="252" \
+    || echo "")
+
+  # If nothing selected (user quit), exit
+  if [ -z "$selected" ]; then
+    echo "$footer"
+    exit 0
+  fi
+
+  # Extract the index from selected row [N]
+  local index=$(echo "$selected" | grep -o '^\[[0-9]*\]' | tr -d '[]')
+
+  # Get the corresponding worktree data
+  local selected_data=$(echo "$worktrees_data" | sed -n "${index}p")
+  local session_name=$(echo "$selected_data" | cut -d'|' -f2)
+  local path=$(echo "$selected_data" | cut -d'|' -f3)
+  local has_session=$(echo "$selected_data" | cut -d'|' -f4)
+
+  echo "$footer"
+  echo ""
+
+  # Check if session exists
+  if [ "$has_session" = "true" ]; then
+    echo "Attaching to session: $session_name"
+    echo "Path: $path"
+    echo ""
+
+    # Check if we're already in a tmux session
+    if [ -n "$TMUX" ]; then
+      # Switch to the session
+      tmux switch-client -t "$session_name"
+    else
+      # Attach to the session
+      tmux attach -t "$session_name"
+    fi
+  else
+    echo "No tmux session found for this worktree"
+    echo "Path: $path"
+    echo ""
+    echo "To create a session, use: /worktree-tmux $(basename "$path")"
+  fi
+}
+
+# Handle refresh loop
+if [ "$1" = "refresh" ]; then
+  # Simple refresh - just re-run the script
+  exec "$0"
+fi
+
+# Run main
+main
