@@ -376,17 +376,13 @@ def do_oauth_flow(server_name, server_config):
     registration_url = oauth_config.get("registration_url")
     resource = oauth_config.get("resource", server_config["url"])
 
-    # Handle scopes - prefer explicit config, filter to read-only if specified
+    # Handle scopes - prefer explicit config, otherwise request all available
+    # Note: read_only=true in URL is enforced server-side, not by filtering scopes
     all_scopes = oauth_config.get("scopes", [])
     configured_scope = oauth_config.get("scope", "") or server_config.get("scope", "")
 
     if configured_scope:
         scope = configured_scope
-    elif server_config.get("read_only", False) or "read_only=true" in server_config.get("url", ""):
-        # Filter to read-only scopes
-        read_scopes = [s for s in all_scopes if s.endswith(":read")]
-        scope = " ".join(read_scopes)
-        print(f"  Using read-only scopes: {scope}")
     else:
         scope = " ".join(all_scopes)
 
