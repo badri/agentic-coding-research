@@ -11,6 +11,11 @@ Usage:
     mcp-cli --servers                        # List configured servers
     mcp-cli --auth <server-name>            # OAuth login for a server
 
+Daemon mode (fast):
+    mcp-cli --daemon                         # Start daemon (background)
+    mcp-cli --query <server> <tool> '{args}' # Fast query via daemon
+    mcp-cli --daemon-stop                    # Stop daemon
+
 Config: ~/.mcp-cli/servers.json
 """
 
@@ -25,6 +30,9 @@ import time
 import hashlib
 import base64
 import secrets
+import socket
+import signal
+import atexit
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, urlencode
@@ -39,6 +47,9 @@ CONFIG_DIR = Path.home() / ".mcp-cli"
 CONFIG_FILE = CONFIG_DIR / "servers.json"
 SESSION_FILE = CONFIG_DIR / "sessions.json"
 TOKENS_FILE = CONFIG_DIR / "tokens.json"
+SOCKET_PATH = CONFIG_DIR / "daemon.sock"
+PID_FILE = CONFIG_DIR / "daemon.pid"
+TOOLS_CACHE_TTL = 300  # 5 minutes
 
 DEFAULT_HEADERS = {
     "Content-Type": "application/json",
@@ -710,6 +721,363 @@ def init_config():
         print(f"Config already exists: {CONFIG_FILE}")
 
 
+# =============================================================================
+# Daemon Mode - Keep connections alive for fast queries
+# =============================================================================
+
+class MCPDaemon:
+    """Long-running daemon that keeps MCP connections alive."""
+
+    def __init__(self):
+        self.clients = {}  # server_name -> httpx.Client
+        self.sessions = {}  # server_name -> session_id
+        self.tools_cache = {}  # server_name -> {"tools": [...], "expires": timestamp}
+        self.tokens = {}  # server_name -> token
+        self.config = load_config()
+        self.running = False
+
+    def get_client(self, server_name):
+        """Get or create persistent httpx client for a server."""
+        if server_name not in self.clients:
+            self.clients[server_name] = httpx.Client(timeout=30.0)
+        return self.clients[server_name]
+
+    def get_token(self, server_name):
+        """Get OAuth token, refreshing if needed."""
+        if server_name not in self.tokens:
+            self.tokens[server_name] = get_token_for_server(server_name)
+        return self.tokens[server_name]
+
+    def get_session(self, server_name, server_config):
+        """Get or initialize MCP session."""
+        if server_name not in self.sessions:
+            oauth_token = self.get_token(server_name)
+            session_id = initialize_session(server_name, server_config, oauth_token=oauth_token)
+            if session_id:
+                self.sessions[server_name] = session_id
+        return self.sessions.get(server_name)
+
+    def get_tools(self, server_name, server_config):
+        """Get tools with caching."""
+        now = time.time()
+        if server_name in self.tools_cache:
+            cached = self.tools_cache[server_name]
+            if now < cached["expires"]:
+                return cached["tools"]
+
+        # Fetch fresh tools
+        oauth_token = self.get_token(server_name)
+        session_id = self.get_session(server_name, server_config)
+        client = self.get_client(server_name)
+
+        url = server_config["url"]
+        headers = {**DEFAULT_HEADERS}
+        if "headers" in server_config:
+            headers.update(server_config["headers"])
+        if oauth_token:
+            headers["Authorization"] = f"Bearer {oauth_token}"
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": str(uuid.uuid4()),
+        }
+
+        try:
+            response = client.post(url, json=payload, headers=headers)
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" in content_type:
+                result = parse_sse_response(response.text)
+            else:
+                result = response.json()
+
+            if "result" in result:
+                tools = result["result"].get("tools", [])
+                self.tools_cache[server_name] = {
+                    "tools": tools,
+                    "expires": now + TOOLS_CACHE_TTL
+                }
+                return tools
+        except Exception as e:
+            pass
+        return []
+
+    def call_tool(self, server_name, server_config, tool_name, arguments):
+        """Call a tool using persistent connection."""
+        oauth_token = self.get_token(server_name)
+        session_id = self.get_session(server_name, server_config)
+        client = self.get_client(server_name)
+
+        url = server_config["url"]
+        headers = {**DEFAULT_HEADERS}
+        if "headers" in server_config:
+            headers.update(server_config["headers"])
+        if oauth_token:
+            headers["Authorization"] = f"Bearer {oauth_token}"
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": str(uuid.uuid4()),
+            "params": {"name": tool_name, "arguments": arguments}
+        }
+
+        try:
+            response = client.post(url, json=payload, headers=headers)
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" in content_type:
+                result = parse_sse_response(response.text)
+            else:
+                result = response.json()
+            return result
+        except Exception as e:
+            return {"error": {"code": -32000, "message": str(e)}}
+
+    def handle_command(self, cmd):
+        """Handle a daemon command."""
+        action = cmd.get("action")
+        server_name = cmd.get("server")
+
+        servers = self.config.get("servers", {})
+
+        if action == "ping":
+            return {"ok": True, "data": "pong"}
+
+        if action == "reload":
+            self.config = load_config()
+            return {"ok": True, "data": "config reloaded"}
+
+        if action == "servers":
+            return {"ok": True, "data": {
+                "servers": [
+                    {"name": name, "url": cfg.get("url", "")}
+                    for name, cfg in servers.items()
+                ]
+            }}
+
+        if server_name not in servers:
+            return {"ok": False, "error": {"code": "NOT_FOUND", "message": f"Server '{server_name}' not configured"}}
+
+        server_config = servers[server_name]
+
+        if action == "tools":
+            tools = self.get_tools(server_name, server_config)
+            return {"ok": True, "data": {
+                "server": server_name,
+                "tools": [
+                    {"name": t.get("name"), "description": t.get("description", ""), "parameters": t.get("inputSchema", {})}
+                    for t in tools
+                ]
+            }}
+
+        if action == "call":
+            tool_name = cmd.get("tool")
+            arguments = cmd.get("arguments", {})
+            result = self.call_tool(server_name, server_config, tool_name, arguments)
+            if "error" in result:
+                return {"ok": False, "error": {"code": "MCP_ERROR", "message": result["error"].get("message", "Unknown error")}}
+            if "result" in result:
+                return {"ok": True, "data": {"server": server_name, "tool": tool_name, "result": result["result"]}}
+            return {"ok": False, "error": {"code": "PARSE_ERROR", "message": "Unexpected response"}}
+
+        return {"ok": False, "error": {"code": "UNKNOWN_ACTION", "message": f"Unknown action: {action}"}}
+
+    def cleanup(self):
+        """Close all connections."""
+        for client in self.clients.values():
+            try:
+                client.close()
+            except Exception:
+                pass
+        self.clients.clear()
+
+    def run(self):
+        """Run the daemon server."""
+        CONFIG_DIR.mkdir(exist_ok=True)
+
+        # Remove stale socket
+        if SOCKET_PATH.exists():
+            SOCKET_PATH.unlink()
+
+        # Write PID file
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+
+        # Create Unix socket
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(SOCKET_PATH))
+        server.listen(5)
+        server.settimeout(1.0)  # Allow checking self.running
+
+        self.running = True
+
+        def cleanup_on_exit():
+            self.cleanup()
+            if SOCKET_PATH.exists():
+                SOCKET_PATH.unlink()
+            if PID_FILE.exists():
+                PID_FILE.unlink()
+
+        atexit.register(cleanup_on_exit)
+
+        def handle_signal(signum, frame):
+            self.running = False
+
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+
+        print(f"MCP daemon started (pid {os.getpid()})")
+        print(f"Socket: {SOCKET_PATH}")
+
+        while self.running:
+            try:
+                conn, _ = server.accept()
+                try:
+                    data = b""
+                    while True:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                        # Check for complete JSON
+                        try:
+                            cmd = json.loads(data.decode())
+                            break
+                        except json.JSONDecodeError:
+                            continue
+
+                    if data:
+                        cmd = json.loads(data.decode())
+                        if cmd.get("action") == "shutdown":
+                            self.running = False
+                            response = {"ok": True, "data": "shutting down"}
+                        else:
+                            response = self.handle_command(cmd)
+                        conn.sendall(json.dumps(response).encode())
+                finally:
+                    conn.close()
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"Daemon error: {e}", file=sys.stderr)
+
+        server.close()
+        cleanup_on_exit()
+        print("MCP daemon stopped")
+
+
+def is_daemon_running():
+    """Check if daemon is running."""
+    if not SOCKET_PATH.exists():
+        return False
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(str(SOCKET_PATH))
+        sock.sendall(json.dumps({"action": "ping"}).encode())
+        response = sock.recv(4096)
+        sock.close()
+        return json.loads(response.decode()).get("ok", False)
+    except Exception:
+        return False
+
+
+def daemon_send(cmd):
+    """Send command to daemon and return response."""
+    if not SOCKET_PATH.exists():
+        return {"ok": False, "error": {"code": "DAEMON_NOT_RUNNING", "message": "Daemon not running. Start with --daemon"}}
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(30.0)
+        sock.connect(str(SOCKET_PATH))
+        sock.sendall(json.dumps(cmd).encode())
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            try:
+                result = json.loads(data.decode())
+                break
+            except json.JSONDecodeError:
+                continue
+        sock.close()
+        return json.loads(data.decode())
+    except Exception as e:
+        return {"ok": False, "error": {"code": "DAEMON_ERROR", "message": str(e)}}
+
+
+def daemon_start():
+    """Start daemon in background."""
+    if is_daemon_running():
+        print("Daemon already running")
+        return
+
+    # Fork to background
+    pid = os.fork()
+    if pid > 0:
+        # Parent - wait briefly and check if daemon started
+        time.sleep(0.5)
+        if is_daemon_running():
+            print(f"Daemon started (pid {pid})")
+        else:
+            print("Failed to start daemon")
+        return
+
+    # Child - become daemon
+    os.setsid()
+    os.chdir("/")
+
+    # Redirect stdout/stderr to log
+    log_file = CONFIG_DIR / "daemon.log"
+    sys.stdout = open(log_file, "a")
+    sys.stderr = sys.stdout
+
+    daemon = MCPDaemon()
+    daemon.run()
+    sys.exit(0)
+
+
+def daemon_stop():
+    """Stop the daemon."""
+    if not is_daemon_running():
+        print("Daemon not running")
+        return
+
+    response = daemon_send({"action": "shutdown"})
+    if response.get("ok"):
+        print("Daemon stopped")
+    else:
+        print(f"Error: {response.get('error', {}).get('message', 'Unknown')}")
+
+
+def daemon_query(server_name, tool_name, arguments):
+    """Query daemon for tool call."""
+    response = daemon_send({
+        "action": "call",
+        "server": server_name,
+        "tool": tool_name,
+        "arguments": arguments
+    })
+    print(json.dumps(response, indent=2))
+    sys.exit(0 if response.get("ok") else 1)
+
+
+def daemon_tools(server_name):
+    """List tools via daemon."""
+    response = daemon_send({
+        "action": "tools",
+        "server": server_name
+    })
+    print(json.dumps(response, indent=2))
+    sys.exit(0 if response.get("ok") else 1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="MCP CLI - Call MCP servers on-demand",
@@ -720,6 +1088,12 @@ Examples:
   mcp-cli --tools betterstack                # List tools on betterstack
   mcp-cli --call betterstack search_logs '{"query": "error"}'
   mcp-cli --init                             # Create config file
+
+Daemon mode (fast queries):
+  mcp-cli --daemon                           # Start daemon in background
+  mcp-cli --query betterstack telemetry_query '{"query": "..."}'  # Fast query
+  mcp-cli --daemon-tools betterstack         # List tools via daemon
+  mcp-cli --daemon-stop                      # Stop daemon
         """
     )
 
@@ -731,6 +1105,14 @@ Examples:
     parser.add_argument("--init", action="store_true", help="Initialize config file")
     parser.add_argument("--clear-sessions", action="store_true", help="Clear cached sessions")
     parser.add_argument("--clear-tokens", action="store_true", help="Clear stored OAuth tokens")
+
+    # Daemon mode arguments
+    parser.add_argument("--daemon", action="store_true", help="Start daemon in background")
+    parser.add_argument("--daemon-stop", action="store_true", help="Stop the daemon")
+    parser.add_argument("--daemon-status", action="store_true", help="Check daemon status")
+    parser.add_argument("--query", nargs=3, metavar=("SERVER", "TOOL", "ARGS"),
+                        help="Fast query via daemon: --query <server> <tool> '<json-args>'")
+    parser.add_argument("--daemon-tools", metavar="SERVER", help="List tools via daemon")
 
     args = parser.parse_args()
 
@@ -748,6 +1130,37 @@ Examples:
         if TOKENS_FILE.exists():
             TOKENS_FILE.unlink()
             print("OAuth tokens cleared.")
+        return
+
+    # Daemon mode handlers
+    if args.daemon:
+        daemon_start()
+        return
+
+    if args.daemon_stop:
+        daemon_stop()
+        return
+
+    if args.daemon_status:
+        if is_daemon_running():
+            print("Daemon is running")
+            if PID_FILE.exists():
+                print(f"PID: {PID_FILE.read_text().strip()}")
+        else:
+            print("Daemon is not running")
+        return
+
+    if args.query:
+        server_name, tool_name, args_json = args.query
+        try:
+            arguments = json.loads(args_json)
+        except json.JSONDecodeError as e:
+            err("INVALID_JSON", f"Invalid JSON arguments: {e}")
+        daemon_query(server_name, tool_name, arguments)
+        return
+
+    if args.daemon_tools:
+        daemon_tools(args.daemon_tools)
         return
 
     config = load_config()
