@@ -284,6 +284,63 @@ def discover_oauth_endpoints(server_url):
         return None
 
 
+def do_dynamic_client_registration(registration_url, redirect_uri):
+    """Register client dynamically per RFC 7591."""
+    print(f"Performing dynamic client registration...")
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            registration_data = {
+                "client_name": "mcp-cli",
+                "redirect_uris": [redirect_uri],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            }
+
+            response = client.post(
+                registration_url,
+                json=registration_data,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response.status_code in (200, 201):
+                data = response.json()
+                client_id = data.get("client_id")
+                client_secret = data.get("client_secret")
+                print(f"  Registered client: {client_id}")
+                # Return both client_id and client_secret
+                return {"client_id": client_id, "client_secret": client_secret}
+            else:
+                print(f"  Registration failed: {response.status_code}")
+                print(f"  Response: {response.text}")
+                return None
+
+    except Exception as e:
+        print(f"  Registration error: {e}")
+        return None
+
+
+def load_client_registrations():
+    """Load registered client IDs."""
+    reg_file = CONFIG_DIR / "registrations.json"
+    if not reg_file.exists():
+        return {}
+    with open(reg_file) as f:
+        return json.load(f)
+
+
+def save_client_registration(server_name, client_data):
+    """Save a client registration (client_id and optionally client_secret)."""
+    reg_file = CONFIG_DIR / "registrations.json"
+    registrations = load_client_registrations()
+    registrations[server_name] = client_data
+    CONFIG_DIR.mkdir(exist_ok=True)
+    with open(reg_file, "w") as f:
+        json.dump(registrations, f, indent=2)
+    # Secure the file since it may contain secrets
+    os.chmod(reg_file, 0o600)
+
+
 def do_oauth_flow(server_name, server_config):
     """Perform OAuth authorization flow."""
     oauth_config = server_config.get("oauth", {})
@@ -302,12 +359,45 @@ def do_oauth_flow(server_name, server_config):
     # Required OAuth config
     auth_url = oauth_config.get("auth_url")
     token_url = oauth_config.get("token_url")
-    client_id = oauth_config.get("client_id", "mcp-cli")
+    registration_url = oauth_config.get("registration_url")
     scope = oauth_config.get("scope", "") or " ".join(oauth_config.get("scopes", []))
     resource = oauth_config.get("resource", server_config["url"])
 
     if not auth_url or not token_url:
         print("Error: OAuth config requires 'auth_url' and 'token_url'")
+        return False
+
+    # Callback setup (needed for registration)
+    callback_port = 8085
+    redirect_uri = f"http://localhost:{callback_port}/callback"
+
+    # Get or create client credentials
+    client_id = oauth_config.get("client_id")
+    client_secret = oauth_config.get("client_secret")
+
+    if not client_id:
+        # Check if we have a registered client
+        registrations = load_client_registrations()
+        reg_data = registrations.get(server_name)
+        if reg_data:
+            if isinstance(reg_data, dict):
+                client_id = reg_data.get("client_id")
+                client_secret = reg_data.get("client_secret")
+            else:
+                # Legacy format - just client_id string
+                client_id = reg_data
+
+    if not client_id and registration_url:
+        # Try dynamic registration
+        reg_result = do_dynamic_client_registration(registration_url, redirect_uri)
+        if reg_result:
+            client_id = reg_result.get("client_id")
+            client_secret = reg_result.get("client_secret")
+            save_client_registration(server_name, reg_result)
+
+    if not client_id:
+        print("Error: No client_id and dynamic registration failed")
+        print("Either configure 'client_id' in oauth config or create an OAuth app manually")
         return False
 
     # Generate PKCE challenge
@@ -318,10 +408,6 @@ def do_oauth_flow(server_name, server_config):
 
     # Generate state for CSRF protection
     state = secrets.token_urlsafe(16)
-
-    # Start local callback server
-    callback_port = 8085
-    redirect_uri = f"http://localhost:{callback_port}/callback"
 
     # Build auth URL
     auth_params = {
@@ -372,15 +458,20 @@ def do_oauth_flow(server_name, server_config):
     print("Exchanging authorization code for token...")
     try:
         with httpx.Client(timeout=30.0) as client:
+            token_data_request = {
+                "grant_type": "authorization_code",
+                "code": OAuthCallbackHandler.auth_code,
+                "redirect_uri": redirect_uri,
+                "client_id": client_id,
+                "code_verifier": code_verifier,
+            }
+            # Add client_secret if we have one (confidential client)
+            if client_secret:
+                token_data_request["client_secret"] = client_secret
+
             response = client.post(
                 token_url,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": OAuthCallbackHandler.auth_code,
-                    "redirect_uri": redirect_uri,
-                    "client_id": client_id,
-                    "code_verifier": code_verifier,
-                },
+                data=token_data_request,
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
 
