@@ -284,7 +284,7 @@ def discover_oauth_endpoints(server_url):
         return None
 
 
-def do_dynamic_client_registration(registration_url, redirect_uri):
+def do_dynamic_client_registration(registration_url, redirect_uri, scopes=None):
     """Register client dynamically per RFC 7591."""
     print(f"Performing dynamic client registration...")
 
@@ -296,6 +296,9 @@ def do_dynamic_client_registration(registration_url, redirect_uri):
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
             }
+            # Include scopes in registration if provided
+            if scopes:
+                registration_data["scope"] = scopes
 
             response = client.post(
                 registration_url,
@@ -401,8 +404,8 @@ def do_oauth_flow(server_name, server_config):
                 client_id = reg_data
 
     if not client_id and registration_url:
-        # Try dynamic registration
-        reg_result = do_dynamic_client_registration(registration_url, redirect_uri)
+        # Try dynamic registration with scopes
+        reg_result = do_dynamic_client_registration(registration_url, redirect_uri, scopes=scope)
         if reg_result:
             client_id = reg_result.get("client_id")
             client_secret = reg_result.get("client_secret")
