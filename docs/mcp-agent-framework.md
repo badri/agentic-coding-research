@@ -4,6 +4,104 @@
 
 A lightweight framework for connecting Claude Code agents to MCP servers via `mcp-cli`.
 
+## Core Principle: Delegated MCP
+
+MCP principles are fully preserved - we add a delegation layer for token efficiency:
+
+```
+Before (native MCP):
+┌─────────┐         ┌────────────┐
+│  Agent  │──MCP───▶│ MCP Server │
+└─────────┘         └────────────┘
+     ↑
+  Tool schemas in context (bloat)
+
+
+After (delegated via mcp-cli):
+┌─────────┐         ┌─────────┐         ┌────────────┐
+│  Agent  │──CLI───▶│ mcp-cli │──MCP───▶│ MCP Server │
+└─────────┘         └─────────┘         └────────────┘
+     ↑                   ↑
+  Just bash tool    Full MCP protocol
+  (minimal bloat)   (preserved)
+```
+
+**What stays the same:**
+- MCP servers unchanged
+- JSON-RPC protocol preserved
+- Tool discovery (`tools/list`)
+- Structured I/O
+- OAuth/auth
+- Session management
+
+**What changes:**
+- Agent doesn't speak MCP directly
+- Agent speaks CLI/bash
+- mcp-cli translates
+- Context stays clean
+
+**Analogy:**
+- MCP = the protocol (USB)
+- MCP Server = the device
+- mcp-cli = adapter/hub
+- Agent = the computer
+
+The computer doesn't need to know USB internals - it just sees a simple interface. The adapter handles the protocol complexity.
+
+**Same MCP principles, one more hop.**
+
+## Prior Art & Research
+
+### Anthropic's Experimental MCP-CLI (Built into Claude Code)
+
+Anthropic has built a similar feature directly into Claude Code:
+
+```bash
+ENABLE_EXPERIMENTAL_MCP_CLI=true
+```
+
+**User-reported results:**
+| Metric | MCP-CLI Off | MCP-CLI On | Savings |
+|--------|-------------|------------|---------|
+| MCP tools | 46.6k tokens | 0 tokens | **100%** |
+| Total context | 74k | 25k | **62% reduction** |
+
+Source: [GitHub Issue #12836](https://github.com/anthropics/claude-code/issues/12836#issuecomment-3629052941)
+
+### Community Consensus (Reddit)
+
+From [r/ClaudeAI discussion](https://reddit.com/r/ClaudeAI/comments/1pm0bu4/):
+
+> "Why use MCP in subagents when they can use CLI with 0 tool context bloat?"
+
+Key insights from community:
+- **CLI for local tools** - zero context bloat
+- **MCP for remote server connections** - structured I/O when needed
+- **Skills for guided CLI usage** - progressive disclosure
+- Trade-off: Token Cost (MCP) vs. Execution Risk (CLI)
+
+### Related Projects
+
+| Project | Description | Comparison |
+|---------|-------------|------------|
+| [Anthropic MCP-CLI](https://github.com/anthropics/claude-code/issues/12836) | Built into Claude Code | Tied to Claude Code ecosystem |
+| [lastmile-ai/mcp-agent](https://github.com/lastmile-ai/mcp-agent) | Full agent framework with MCP | Heavier, includes orchestration/Temporal |
+| [llmc](https://github.com/vmlinuzx/llmc) | Progressive disclosure for tools | Focuses on tool context reduction |
+
+### How Our mcp-cli Differs
+
+| Feature | Anthropic's MCP-CLI | Our mcp-cli |
+|---------|---------------------|-------------|
+| Built into Claude Code | ✅ | ❌ (standalone) |
+| Works with any agent | ❌ | ✅ |
+| Daemon mode | ❓ Unknown | ✅ |
+| Tool caching | ❓ | ✅ |
+| Portable/reusable | ❌ | ✅ |
+| OAuth handling | ❓ | ✅ |
+| Open source | ❌ (internal) | ✅ |
+
+**Our differentiator:** Standalone, portable, daemon mode with connection pooling, works outside Claude Code ecosystem, can be used with any AI agent that has bash access.
+
 ```
 ┌─────────────────┐     CLI/JSON      ┌─────────────┐    HTTP/SSE     ┌────────────────┐
 │  Claude Code    │ ──────────────────▶│   mcp-cli   │ ───────────────▶│   MCP Server   │
