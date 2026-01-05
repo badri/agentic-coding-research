@@ -491,7 +491,7 @@ def do_oauth_flow(server_name, server_config):
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
 
-            if response.status_code != 200:
+            if response.status_code not in (200, 201):
                 print(f"Token exchange failed: {response.status_code}")
                 print(response.text)
                 return False
